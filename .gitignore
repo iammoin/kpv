@@ -1,0 +1,24 @@
+# Local Python environments
+.venv/
+voice-clone-poc/.venv/
+__pycache__/
+*.py[cod]
+
+# Private reference and generated audio
+voice-clone-poc/samples/*
+!voice-clone-poc/samples/.gitkeep
+voice-clone-poc/outputs/*
+!voice-clone-poc/outputs/.gitkeep
+voice-clone-poc/reference_texts.local.json
+
+# Credentials and local configuration
+.env
+.env.*
+!.env.example
+*.token
+
+# Model and Hugging Face caches
+.cache/
+huggingface/
+voice-clone-poc/.cache/
+voice-clone-poc/models/

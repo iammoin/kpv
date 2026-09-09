@@ -1,246 +1,310 @@
-# Voice Intake Assistant: Implementation Handoff
+# IndicF5 Voice-Cloning Proof of Concept: Implementation Handoff
 
 ## 1. Objective and current state
 
-Build a personal-use, self-hosted pre-consultation intake assistant for English, Hindi, and Hinglish. It asks predefined questions, accepts natural replies and corrections, avoids repeating answered questions, and exports structured JSON plus a readable summary. It does not diagnose or prescribe.
+Build a local Python 3.12 proof of concept that uses a consented 20–60 second recording of the user's spouse, plus its exact transcript, to synthesize new Hindi and Hinglish WAV files in the same voice with AI4Bharat IndicF5.
 
-The repository currently contains only `AGENTS.md`. All paths and commands below are implementation targets, not existing capabilities. Leave `AGENTS.md` unchanged. This plan authorizes implementation work, not deployment or contacting patients.
+This proof of concept is now the only active milestone. It supersedes the previous intake-assistant implementation order until voice similarity, intelligibility, code-switching, and local runtime feasibility pass the manual gate in this document. Do not build FastAPI, a frontend, Whisper, Qwen, Pipecat, LiveKit, SIP, a consultation workflow, a database, RAG, model training, or telephony during this phase.
 
-First milestone: a cooperative five-minute Hindi/Hinglish session resolves 15 required question slots and produces a faithful summary while supporting interruptions. Five minutes is a benchmark, not a timeout: never rush a speaker or mark missing answers complete to meet it.
+The repository currently has no application code or model assets. `new.txt` is the source request; `AGENTS.md` remains authoritative for repository-wide privacy and scope rules. Reference recordings, transcripts containing private speech, generated audio, Hugging Face credentials, model weights, and caches must remain outside Git.
 
-## 2. Decisions and boundaries
+## 2. Verified upstream facts and decisions
 
-| Area | MVP decision |
-| --- | --- |
-| Backend | Python 3.11, FastAPI, Pydantic v2 |
-| Persistence | SQLite, SQLAlchemy 2, Alembic; one local user and one active voice session |
-| Browser | React, TypeScript, Vite; text mode first |
-| Streaming | Pipecat SmallWebRTCTransport; local browser microphone and speaker |
-| STT | Local faster-whisper, multilingual model; model size selected by benchmark |
-| LLM | Local Qwen through Ollama, schema-constrained extraction; model ID configurable |
-| TTS | Benchmark local Indic Parler-TTS for English/Hindi; Hinglish quality is an acceptance gate |
-| Workflow | Versioned YAML, deterministic transitions, templated prompts |
-| Summary | Deterministic rendering of validated state for the MVP |
-| Tooling | uv, Ruff, pytest; npm, TypeScript, ESLint, Vitest, Playwright |
+The implementation must verify signatures again against the revision actually installed. The current official guidance establishes:
 
-Use no paid/cloud inference fallback. No fine-tuning, RAG, vector database, multi-agent orchestration, telephony, clinician dashboard, or public hosting in this milestone. LLM question rephrasing and narrative summaries can follow only after deterministic behavior works.
+- Official source: [AI4Bharat/IndicF5](https://github.com/AI4Bharat/IndicF5).
+- Official model: [ai4bharat/IndicF5](https://huggingface.co/ai4bharat/IndicF5).
+- The model repository is gated; the user must accept its access terms and authenticate locally before the first download.
+- The official repository demonstrates Python 3.10, but this project uses Python 3.12 after compatibility verification. Prefer 3.12 over 3.14 because the IndicF5/PyTorch audio stack has broader wheel and dependency support on 3.12. Install IndicF5 with `pip install git+https://github.com/ai4bharat/IndicF5.git`.
+- The official API loads `AutoModel.from_pretrained("ai4bharat/IndicF5", trust_remote_code=True)` and invokes the model with target text, `ref_audio_path`, and `ref_text`.
+- Official output examples save float audio at 24,000 Hz with `soundfile`.
+- IndicF5 lists Hindi among its 11 supported languages. It does not list English or Hinglish as separately supported languages. English-reference and Hinglish code-switching quality are experiments, not promises.
+- Loading gated custom code and weights is a trust boundary. Pin the validated IndicF5 source commit and model revision in the finished setup rather than tracking moving `main`.
 
-Hardware is unknown. Record OS, RAM, GPU/VRAM, disk budget, and intended browser in `docs/runtime.md` before downloading models. Do not promise real-time CPU performance. Implement fake adapters and text mode while model deployment is unresolved. If native Windows dependencies fail, document the concrete issue and evaluate WSL2 rather than silently changing the runtime.
+Use CUDA automatically when `torch.cuda.is_available()` is true and the installed IndicF5 revision supports the selected placement path. Otherwise use CPU and state that generation may be slow. Do not silently substitute a cloud service or another TTS model. Native Windows dependency compatibility is unknown; attempt the documented Windows setup first, then record the concrete blocker and use WSL2 only if required.
 
 ## 3. Target layout
 
+Create this isolated subproject:
+
 ```text
-backend/pyproject.toml
-backend/uv.lock
-backend/src/intake/
-  main.py                 # FastAPI application factory
-  config.py               # environment validation
-  api/                    # HTTP routes and WebRTC signaling
-  domain/                 # schemas, workflow engine, summary renderer
-  services/               # turn processing and session lifecycle
-  adapters/               # Ollama, STT, TTS, fake implementations
-  storage/                # SQLAlchemy models and repositories
-  voice/                  # Pipecat pipeline and cancellation
-backend/alembic/
-frontend/src/
-workflows/general_intake.v1.yaml
-tests/unit/
-tests/integration/
-tests/fixtures/           # synthetic text and optional synthetic audio
-tests/evaluation/
-docs/runtime.md
-docs/evaluation.md
-docs/PROGRESS.md
-.env.example
-README.md
+voice-clone-poc/
+  app.py
+  requirements.txt
+  README.md
+  evaluation.md
+  samples/
+    spouse_hindi.wav       # local, optional, ignored
+    spouse_english.wav     # local, optional, ignored
+    spouse_hinglish.wav    # local, default, ignored
+  outputs/                 # generated WAV files, ignored
 ```
 
-Keep domain code independent of FastAPI, Pipecat, and inference libraries. Keep optional heavy speech dependencies out of the default unit-test installation.
+Also update the repository `.gitignore` so the three private reference recordings, all generated output audio, local virtual environments, Hugging Face/model caches, and credentials cannot be committed. Keep empty `samples/` and `outputs/` directories with safe placeholder files only if Git requires them. Do not add a real recording, transcript, generated voice file, access token, or model weight to the repository.
 
-## 4. Data and workflow contracts
+## 4. Runtime and configuration contract
 
-### Session and answer state
+### Reference profiles
 
-Define Pydantic contracts before adapters:
+`app.py` must define these stable control constants:
 
-- `Session`: UUID, workflow ID/version, locale preference (`en`, `hi`, `hinglish`), timezone, timestamps, revision, status, current question ID, pending confirmation, answers.
-- Session status: `created`, `active`, `paused`, `completed`, `stopped`, `needs_human_review`.
-- `Answer`: field ID, typed value, raw text, source turn IDs, status, confirmation requirement, confirmation turn ID.
-- Answer status: `unanswered`, `captured`, `confirmed`, `unknown`, `declined`, `not_applicable`. Missing is never equivalent to a negative answer.
-- `Turn`: client-generated UUID, sequence, final transcript, processing status, timestamps. Interim transcripts are display-only.
-- `ExtractionProposal`: allowed field updates with supporting source text and ambiguity flags. It cannot change workflow order, session status, or rules.
-- `IntakeSummary`: schema/workflow versions, session ID, symptoms, duration, severity, measurements, medications, allergies, conditions, prior treatment, important negatives, unanswered questions, unconfirmed values, follow-up items, explicit reported safety flags, completion status.
+```python
+REFERENCE_MODE = "hinglish"
 
-Represent measurements with value, unit, and original text. Medication entries have separately nullable name, strength, dose, frequency, and last-taken fields. Never infer a dose or frequency from a product strength. Keep reported names intact; no automatic brand substitution.
+REFERENCE_TEXT = """<replace this with the exact words spoken in spouse_hinglish.wav>"""
 
-Store original relative dates. Normalize only with an explicit session date/timezone and clear meaning; ambiguous `kal` needs clarification. Explicitly distinguish `none`, `unknown`, and an empty collection awaiting an answer.
+HINDI_REFERENCE_TEXT = """<replace with the exact Hindi reference transcript>"""
+ENGLISH_REFERENCE_TEXT = """<replace with the exact English reference transcript>"""
+```
 
-### Initial questionnaire
+Private exact transcript overrides belong in the ignored local file `reference_texts.local.json`, keyed by mode. This keeps the tracked implementation usable without committing a person's transcript. The Hinglish override is required by the current request; Hindi and English remain placeholders until their own consented recordings and exact transcripts exist.
 
-Use these 15 proposed slots as an engineering fixture. Exact patient-facing wording and safety rules need review by the intended clinician before real use; the coding model must not invent medical thresholds or triage protocols.
+Map the only allowed modes—`hindi`, `english`, and `hinglish`—to their matching audio path and transcript. `REFERENCE_TEXT` is the Hinglish fallback required by the request; it must not be renamed away. The Hinglish profile is the default for Hinglish targets. Each mode is independently usable only after its own recording and exact transcript are present.
 
-| ID | Collected information |
-| --- | --- |
-| `chief_complaint` | Main reason for consultation |
-| `onset_duration` | Start time and duration |
-| `progression` | Improving, worsening, unchanged, or uncertain |
-| `severity_impact` | Patient's description and effect on usual activity |
-| `temperature` | Measured value/unit, not measured, or unknown |
-| `associated_symptoms` | Other reported symptoms |
-| `existing_conditions` | Known conditions or explicit none |
-| `current_medications` | Names and details actually reported |
-| `allergies` | Allergies/reactions, explicit none, or unknown |
-| `previous_treatment` | Treatments already tried and reported response |
-| `blood_pressure` | Reading if available; no measurement request required |
-| `oxygen_saturation` | Reading if available; no measurement request required |
-| `breathing_concern` | Clinician-reviewed predefined safety question |
-| `chest_discomfort` | Clinician-reviewed predefined safety question |
-| `fainting_confusion` | Clinician-reviewed predefined safety question |
+Pass the selected transcript to IndicF5 byte-for-byte as authored in the tracked constant or ignored local override. Do not trim, transliterate, translate, punctuate, case-fold, spell-correct, or otherwise normalize it automatically. Treat an unchanged placeholder as missing, not as a valid non-empty transcript.
 
-Consent and language selection precede these slots. Each YAML question includes stable ID, localized prompts, field type, required flag, confirmation rule, skip condition, and retry limit. Unknown/declined responses resolve a slot for navigation but remain listed as unavailable in the summary. Completion requires every required slot to be resolved and no unresolved confirmation; it does not imply every clinical fact is known.
+Reference recording guidance in the README:
 
-### Turn algorithm
+- one consented speaker;
+- approximately 20–60 seconds;
+- natural speech matching the profile language;
+- minimal background noise;
+- no music;
+- no clipping;
+- as little room echo as practical;
+- transcript exactly matches every spoken word, including code-switching and disfluencies intentionally retained.
 
-1. Reject duplicate turn IDs; reject stale revisions; serialize updates per session.
-2. Pass only final transcript, permitted fields, current answers, and pending question to extraction.
-3. Validate the proposal; keep supporting text and reject unsupported fields/values.
-4. Apply explicit corrections with provenance; reconfirm changed important values.
-5. Capture answers volunteered for future questions; do not ask those questions again.
-6. Evaluate configured safety rules before ordinary progression. A flagged session uses a fixed reviewed message and `needs_human_review`; no LLM-generated medical advice.
-7. Confirm medications, dosage, allergies, temperature, BP, and SpO2 before treating them as confirmed. One short confirmation may group related values; ambiguous replies cannot confirm unrelated fields.
-8. Otherwise select the earliest unresolved applicable slot. Ask one concise question at a time.
-9. After two unsuccessful clarifications, offer unknown/skip or text entry; do not loop indefinitely.
-10. Persist state and turn result atomically, then render the next prompt or final summary.
+Do not implement audio cleanup in this milestone. A poor source recording should fail manual quality review, not be silently transformed.
 
-Malformed model output gets at most one repair attempt. Timeouts or another failure leave answers unchanged and return a retryable message. User transcript content is data, including instructions to ignore the questionnaire.
+### Model lifecycle and device reporting
 
-## 5. Ordered implementation tasks
+Use one lazy, process-local model instance. Validate CLI inputs before loading or downloading the model. The first valid generation may load it; subsequent generations in the same process must reuse it.
 
-Complete one task at a time. Each task must leave runnable code, relevant tests, and a short entry in `docs/PROGRESS.md`. Do not start dependent tasks with a failing prerequisite.
+At startup/model load, print or log:
 
-### T01 — Scaffold and repeatable checks
+- `CUDA available: True|False`;
+- GPU name when CUDA is available, otherwise an explicit CPU message;
+- selected execution device;
+- model ID and pinned revision;
+- `Model loaded successfully` only after loading actually completes.
 
-Create the target Python package, Vite application, dependency lockfiles, `.gitignore`, `.env.example`, and README. Configure Ruff, pytest discovery for root `tests/`, TypeScript, ESLint, Vitest, and Playwright. Add `/health` and an empty session screen. Ignore `.env`, local SQLite files, recordings, transcripts, model caches, and generated evaluation outputs.
+If device placement is controlled inside the installed IndicF5 custom code, follow that revision's documented API rather than calling an unsupported `.to(...)`. Confirm actual parameter/device placement after load and fail clearly if CUDA was selected but the model is not usable there.
 
-Acceptance: clean dependency installation, health endpoint test, frontend build, and lint checks pass. README contains tested PowerShell-friendly commands. Pin compatible dependency versions using actual installation results, not guessed version numbers.
+### Generation API
 
-### T02 — Contracts and workflow validation
+Implement this public function exactly:
 
-Implement schemas and the 15-slot YAML with English, Hindi, and Hinglish prompts. Mark clinical wording as draft. Validate unique IDs, prompt availability, allowed field types, and referenced skip conditions at startup. Add synthetic fixtures with explicit expected normalized answers.
+```python
+def generate_voice(text: str, output_path: str) -> None:
+    ...
+```
 
-Acceptance: invalid workflows fail with actionable errors; summary schema distinguishes unknown, negative, and unconfirmed answers; all three prompt variants load.
+It uses the currently selected reference profile, invokes the already-loaded IndicF5 model, converts `int16` output to normalized `float32` only when needed, and writes a stable WAV file at 24 kHz. If the pinned model revision requires another sampling rate, use that rate and update this plan and README with evidence; never relabel samples with the wrong rate.
 
-### T03 — Pure questionnaire engine
+The function must not return before the WAV is fully written. It must not overwrite a reference recording. An explicit output path may overwrite an existing generated output only when that path was deliberately supplied; automatic names must be collision-resistant.
 
-Implement a pure state transition function accepting state plus a validated extraction proposal and returning new state plus the next action. Use table-driven synthetic proposals; no LLM dependency. Implement confirmation, corrections, skip/unknown, completion, stop, and configured safety interruption.
+## 5. CLI contract
 
-Acceptance: deterministic tests cover out-of-order answers, no repeated answered questions, correction invalidating confirmation, explicit negatives, ambiguous confirmation, exhausted retries, and incomplete sessions. `Dolo 650 le raha hoon` must not create an invented dosing frequency.
-
-### T04 — Persistence and text API
-
-Add migrations and session/turn persistence. Implement `POST /api/sessions`, `GET /api/sessions/{id}`, `POST /api/sessions/{id}/turns`, `POST /api/sessions/{id}/stop`, `GET /api/sessions/{id}/summary`, and `DELETE /api/sessions/{id}`. Return revision, next action, question ID, and completion state on turn responses. Use a fake extractor for integration tests.
-
-Acceptance: a complete scripted session survives process restart; duplicate turn replay returns its prior result; conflicting revisions return 409; deletion removes associated records; missing sessions return 404. Persist turn results and revisions in a single transaction.
-
-### T05 — Functional text interface
-
-Build start/consent, language selection, transcript, text reply, unknown/skip, stop, progress, and result screens. Provide JSON download and readable summary. Show captured/unconfirmed values accurately. Store session identifiers only as needed; do not put transcripts in browser persistent storage.
-
-Acceptance: Playwright completes a fake session and exports JSON; reload resumes; a stopped session is visibly incomplete; declined consent creates no intake session.
-
-### T06 — Local extraction model
-
-Implement an asynchronous Ollama adapter with schema-constrained output, configurable model ID, timeout, bounded repair, and cancellation. Add a strict extraction prompt and fake adapter with the same interface. Model responses propose facts only; the engine chooses actions. Keep summary rendering deterministic.
-
-Acceptance: synthetic English/Hindi/Hinglish fixtures pass the evaluation script; malformed JSON, invented fields, prompt injection, and unavailable model tests preserve state. Record exact model ID, quantization, prompt version, latency, and observed accuracy. Do not claim fake-adapter results establish real model quality.
-
-### T07 — Hardware and speech feasibility gate
-
-Record runtime information and choose a multilingual faster-whisper configuration. Benchmark local TTS using Indic Parler-TTS with short English, Hindi, and mixed-language prompts, medicine names, and numbers. Read model license/runtime requirements before selecting weights. Test all three services together for memory pressure. Cache synthesized fixed questionnaire prompts to reduce latency.
-
-Acceptance: `docs/runtime.md` records installation commands, model revisions, peak memory, cold/warm timings, audio formats, and known pronunciation failures. If Hinglish synthesis or latency fails, document the blocker and benchmark another local model; keep text mode working and do not label voice complete. Avoid automatic large downloads on application startup.
-
-### T08 — Browser audio transport
-
-Integrate Pipecat SmallWebRTC signaling into FastAPI and its matching browser client. Add microphone permission, connect/disconnect, mute, visible connection state, and audio playback. Use a fake speech pipeline first. Expose local session-bound signaling; release resources on disconnect.
-
-Acceptance: browser sends microphone audio and receives test speech; permission denial and disconnect are recoverable; repeated connects do not leak tasks or audio devices. Document localhost/secure-context requirements and supported browser.
-
-### T09 — Connect the voice turn loop
-
-Wire audio to VAD, STT, the same turn service used by text mode, and TTS. Resample explicitly at adapter boundaries. Whisper is utterance-based here: do not claim native streaming recognition. Display interim text separately if supported; only finalized utterances mutate the engine. Serialize turns and keep inference off the API event loop.
-
-Acceptance: spoken English, Hindi, and Hinglish produce summaries through the shared engine; silence does not create answers; model errors permit retry/text entry; independent sessions cannot share state.
-
-### T10 — Interruptions and recovery
-
-On detected user speech, stop playback, clear queued audio, and cancel or invalidate pending generation using an output-generation ID. Reject late audio/results from older generations. Retain the unanswered question if its playback was interrupted; use the user's final reply to decide whether it was answered. Resume paused sessions from persisted state.
-
-Acceptance: interruption during TTS, during inference, and during confirmation produces no overlapping stale audio or duplicate state update. Disconnect during processing and rapid stop/reconnect leave a consistent session. Record observed interruption latency.
-
-### T11 — Evaluate and package the milestone
-
-Create at least 30 synthetic text cases (10 per language mode) and 12 consented or synthetic audio conversations (4 per mode). Include accents, code-switching, background noise, medication names, numbers, negation, corrections, uncertainty, and interruptions. Add at least three five-minute cooperative end-to-end runs.
-
-Acceptance: publish the evaluation report below; fix failing cases before marking the milestone complete. Add setup/troubleshooting instructions, data deletion instructions, and a manual smoke-test checklist. No recordings or patient data enter Git. Report untested environments honestly.
-
-## 6. Verification commands and release gates
-
-T01 must make these commands work from the repository root; adjust this document if a verified tool requires a different invocation:
+Required custom-generation form:
 
 ```powershell
-uv sync --project backend --extra dev
-uv run --project backend ruff check backend tests
-uv run --project backend ruff format --check backend tests
-uv run --project backend pytest tests/unit tests/integration
-uv run --project backend uvicorn intake.main:app --reload --host 127.0.0.1
-npm --prefix frontend ci
-npm --prefix frontend run lint
-npm --prefix frontend run test -- --run
-npm --prefix frontend run build
-npm --prefix frontend run test:e2e
+python app.py --text "Aap currently koi medicines le rahe hain?"
 ```
 
-Document any browser installation prerequisite and configure Playwright's web servers. Ordinary tests must run without downloaded models, audio devices, or network inference. Put real-model/audio evaluation behind a separate documented command.
+Full form:
 
-Proposed engineering targets, to be measured on declared hardware:
+```powershell
+python app.py --text "Aap currently koi medicines le rahe hain?" --reference hinglish --output outputs/custom.wav
+```
 
-- 100% schema-valid exported summaries and no invented facts in the curated fixture set.
-- At least 95% correct annotated field values across text evaluation; report counts and results by language. Exclude unavailable values from the accuracy denominator and report them separately.
-- Every critical value in the test set is either explicitly confirmed or visibly unconfirmed; no silent guess is accepted.
-- Every configured positive safety fixture interrupts ordinary intake. This verifies configured behavior, not clinical sensitivity.
-- All 15 slots resolved in the three cooperative milestone runs; report unknown/declined counts independently.
-- Target warmed end-of-speech to first assistant audio: p95 at most 3 seconds; target speech onset to playback stop: p95 at most 500 ms. These are provisional performance goals, not measured guarantees.
-- Report STT word/character error rates and critical-token errors separately. Hindi script variants may distort word error rate; extraction accuracy and manual listening remain necessary.
+CLI behavior:
 
-Use monotonic timing and report sample sizes. A failed hardware or pronunciation gate means voice remains incomplete even if automated tests pass.
+- `--text` accepts one non-empty target utterance.
+- `--reference` accepts only `hindi`, `english`, or `hinglish` and defaults to `REFERENCE_MODE`.
+- `--output` is optional. When omitted, create a collision-resistant `.wav` name under `outputs/`.
+- Resolve bundled paths relative to `app.py`, not the caller's current directory.
+- Create the output parent directory when absent.
+- Return a nonzero exit code and a concise actionable error for invalid input, missing references, placeholder/empty transcripts, access/authentication failure, model-load failure, generation failure, or write failure.
+- Do not catch `KeyboardInterrupt` as an ordinary generation error.
 
-## 7. Local privacy and clinical configuration
+Support one explicit batch command for the required evaluation set:
 
-Bind services to loopback by default and configure explicit local CORS origins. No recording by default. Show consent before microphone capture; persist the minimum session data needed for resume and export. Avoid transcript/model-prompt content in logs. Provide explicit session deletion; document that exported files/backups require separate removal.
+```powershell
+python app.py --generate-tests --reference hinglish
+```
 
-Store red-flag wording, triggers, and fixed responses in reviewed configuration. Draft fixtures may support development, but the app must indicate that clinical configuration is unreviewed until that review is recorded. Do not infer numeric emergency thresholds, claim medical validation, or ask the coding model to invent emergency advice. Real-patient use requires review of this content; it does not block engineering with synthetic data.
+`--generate-tests` and `--text` are mutually exclusive. The batch command generates these exact files and target strings:
 
-## 8. Instructions for the implementing model
+| Output | Target text |
+| --- | --- |
+| `outputs/test_01.wav` | `Namaste, aapko kya problem ho rahi hai?` |
+| `outputs/test_02.wav` | `Okay ma'am, aap mujhe batayiye ki aapko ye problem kitne time se ho rahi hai.` |
+| `outputs/test_03.wav` | `Aap currently koi medicines le rahe hain?` |
+| `outputs/test_04.wav` | `Aap Kapiva ka product kitne time se use kar rahe hain?` |
+| `outputs/test_05.wav` | `Okay, aur aapko diabetes, blood pressure ya thyroid ki koi problem hai?` |
 
-Read `AGENTS.md`, this document, and `docs/PROGRESS.md` if present. Inspect the actual repository before editing. Execute the earliest unfinished task whose prerequisites pass. Prefer small functions and direct adapters over generic frameworks. Do not implement later phases as speculative scaffolding.
+Load the model once for the whole batch. Fail the command if any requested output fails; identify the failed phrase and leave already completed files visible rather than claiming the whole batch succeeded.
 
-For each task, record status (`pending`, `in_progress`, `done`, `blocked`), changed files, exact checks and results, unresolved issues, and the next task. A task is done only when its acceptance checks pass. Do not replace real dependencies with stubs and call an integration complete. If hardware is unavailable, continue independent tasks and state exactly which real-model checks remain blocked.
+## 6. Validation and logging
 
-Suggested handoff prompt:
+Run these checks in order before inference:
 
-> Implement the next unfinished task in docs/IMPLEMENTATION_PLAN.md. Follow AGENTS.md and inspect docs/PROGRESS.md first. Complete its deliverables and acceptance checks, then update the progress file. Keep the deterministic engine authoritative. Use fake adapters only where the plan permits them. Do not deploy, download unspecified large models, change the selected architecture, or claim unrun checks passed. End with changed behavior, validation results, blockers, and the next task ID.
+1. Target text is present and not whitespace-only.
+2. Reference mode is one of the three allowed values.
+3. Selected reference transcript is neither empty nor an unchanged placeholder.
+4. Selected reference audio exists and is a regular readable file.
+5. Explicit output does not resolve to any configured reference file.
+6. Output parent exists or can be created.
+7. Model loads successfully and is callable.
 
-## 9. Later phases
+Use actionable errors naming the selected mode and expected path, but never print the reference transcript or inspect/log the private audio content. Basic WAV readability may be checked before model load; do not normalize or rewrite the source.
 
-After the MVP passes: improve confidence-driven retries and medical vocabulary evaluation; evaluate alternative Indic STT/TTS models; consider LLM prompt rephrasing with semantic safeguards. Telephony follows as a separate project using the existing engine. Fine-tuning is considered only after a consented evaluation set identifies repeatable errors that simpler changes cannot fix.
+For each generation, log to the console:
 
-## 10. Primary implementation references
+- selected reference mode;
+- target text, as explicitly required for this local POC;
+- generation start;
+- generation complete;
+- resolved output path;
+- elapsed generation time measured with a monotonic clock.
 
-Verify SDK signatures against the pinned versions during implementation; these references informed the architecture, not a tested dependency matrix.
+Do not log the reference transcript, audio samples, access tokens, environment dumps, or model-cache paths. The README must warn that target text appears in console logs and should not contain real patient data during this POC.
 
-- [Pipecat SmallWebRTC transport](https://docs.pipecat.ai/api-reference/server/services/transport/small-webrtc): local peer-to-peer transport and optional ICE configuration.
-- [Pipecat browser voice UI](https://docs.pipecat.ai/client/guides/building-a-voice-ui): matching browser client integration.
-- [faster-whisper](https://github.com/SYSTRAN/faster-whisper): local inference and CPU/GPU quantization options.
-- [Ollama structured outputs](https://docs.ollama.com/capabilities/structured-outputs): schema-constrained local extraction.
-- [Indic Parler-TTS model card](https://huggingface.co/ai4bharat/indic-parler-tts): English/Hindi support; mixed-language quality still needs measurement.
+## 7. Ordered implementation tasks
+
+Complete tasks in order. Do not claim a task or the quality gate complete without running its acceptance checks.
+
+### P01 — Record environment and install the official stack
+
+Record Windows version, RAM, GPU model/VRAM, NVIDIA driver, CUDA compatibility, and free disk space before downloading weights. Create `voice-clone-poc/` and a Python 3.12 virtual environment. Start from the official IndicF5 Git installation method. Install compatible PyTorch, NumPy, SoundFile, Transformers, IndicF5, and its declared dependencies.
+
+After a real successful install, pin exact compatible versions plus the IndicF5 Git commit in `requirements.txt`; do not invent pins in advance. Document the tested PowerShell setup. Include Hugging Face model-access acceptance and local authentication steps without embedding a token. If PyTorch needs a CUDA-specific index URL, document the exact tested command separately from the requirements install.
+
+Acceptance:
+
+- the activated environment reports Python 3.12;
+- imports for `torch`, `numpy`, `soundfile`, `transformers`, and IndicF5 dependencies succeed;
+- CUDA availability and GPU name are recorded;
+- a clean reinstall command is documented;
+- no private/model artifact is tracked.
+
+### P02 — Implement reference configuration and validation
+
+Add the three reference profiles, exact transcript placeholders, ignored local transcript overrides, path resolution, CLI parsing, validation, automatic output naming, and concise errors. Keep reference text unchanged from its source constant or local override through the model call.
+
+Acceptance:
+
+- `python app.py --help` documents custom and batch modes;
+- empty text, unknown mode, missing audio, placeholder transcript, and unsafe output/reference collision each fail before model loading;
+- omitted output yields a unique path under `outputs/`;
+- commands work when launched both inside `voice-clone-poc/` and from the repository root.
+
+### P03 — Integrate and smoke-test IndicF5
+
+Load `ai4bharat/IndicF5` once with the pinned official API and `trust_remote_code=True`. Implement device reporting, `generate_voice`, dtype handling, 24 kHz WAV writing, monotonic timing, and logging.
+
+This task requires one consented reference WAV and its exact transcript to be supplied locally. First generate a short synthetic target with the selected profile. Inspect the resulting file metadata and listen to it; successful file creation alone does not establish voice quality.
+
+Acceptance:
+
+- the model-load success message is emitted only after a usable load;
+- two generations in one process use one model load;
+- output is a readable, non-empty mono WAV at the actual documented sample rate;
+- CUDA is used when available and supported by the pinned stack, otherwise CPU use is explicit;
+- no reference transcript or audio content appears in logs;
+- the spoken result is intelligible in a manual listen.
+
+### P04 — Generate the five-phrase comparison set
+
+Run the exact batch through the Hinglish reference to create `test_01.wav` through `test_05.wav`. If Hindi and English references are available, rerun the same five targets into separate local comparison directories or filenames without overwriting the Hinglish baseline.
+
+Acceptance:
+
+- all five required Hinglish-reference outputs are readable WAV files;
+- each file audibly corresponds to its requested phrase;
+- model weights are loaded once per batch;
+- measured generation time is recorded per phrase;
+- generated files remain ignored by Git.
+
+### P05 — Evaluate the quality gate
+
+Create `evaluation.md` with this 1–5 manual-rating table:
+
+| Test | Voice similarity | Hindi pronunciation | English pronunciation | Hinglish naturalness | Notes |
+| ---- | ---------------- | ------------------- | --------------------- | -------------------- | ----- |
+| `test_01` |  |  |  |  |  |
+| `test_02` |  |  |  |  |  |
+| `test_03` |  |  |  |  |  |
+| `test_04` |  |  |  |  |  |
+| `test_05` |  |  |  |  |  |
+
+The consented speaker and user should rate each output. Notes must explicitly cover voice resemblance, Hindi pronunciation, English words inside Hindi, `Kapiva`, medicine names, numbers/dosage where tested, natural pauses, speaking speed, artifacts, and instability. Leave ratings blank until a person has listened; never fabricate subjective scores.
+
+The gate passes only when all five unseen sentences:
+
+- sound reasonably similar to the consented speaker by manual review;
+- remain understandable;
+- pronounce English words inside Hinglish acceptably;
+- generate entirely locally after the one-time model download;
+- produce repeatable readable WAV output.
+
+Record failures exactly. Do not tune against or edit the five target strings merely to make the gate pass. Reference choice, recording quality, punctuation, and model limitations may be compared, but every comparison must identify its reference mode.
+
+Write `voice-clone-poc/README.md` only after commands have been exercised. Cover prerequisites, Python 3.12, virtual-environment setup, tested installation, model access/authentication, CUDA/GPU notes, CPU limitations, placement and quality of reference audio, exact transcript replacement, all CLI forms, batch generation, output locations, troubleshooting, the Colab notebook, and known Hindi/Hinglish/English limitations.
+
+
+State prominently that cloning or generating a person's voice requires that speaker's informed consent and that generated clips can be mistaken for real speech. Keep generated clips private and do not use them to deceive, impersonate, authenticate, or contact third parties.
+
+Acceptance:
+
+- every documented command matches an exercised command or is clearly labeled conditional;
+- setup starts from a clean Python 3.12 environment;
+- README does not claim English/Hinglish support beyond observed results;
+- README explains deletion of references, outputs, model caches, and local credentials.
+
+## 8. Verification checklist
+
+Use PowerShell-friendly commands. Exact install commands and pins are outputs of P01, not assumptions in this planning-only repository.
+
+```powershell
+cd voice-clone-poc
+py -3.12 -m venv .venv
+.\.venv\Scripts\Activate.ps1
+python --version
+python -m pip install --upgrade pip
+# Install the verified PyTorch build for this workstation.
+pip install -r requirements.txt
+python app.py --help
+python app.py --text "Aap currently koi medicines le rahe hain?"
+python app.py --generate-tests --reference hinglish
+```
+
+For the real-model smoke test, record:
+
+- installed IndicF5 source commit and Hugging Face model revision;
+- Python, PyTorch, and CUDA versions;
+- selected device and GPU;
+- reference mode, source duration, channels, sample rate, and encoding—never its transcript/content;
+- output channels, sample rate, frame count, and encoding;
+- cold model-load time and per-generation elapsed time;
+- manual intelligibility result and all five evaluation ratings.
+
+Validation failures can be exercised without model access. Real generation and subjective similarity cannot be verified until the user places a consented local sample, supplies its exact transcript, accepts the gated model terms, and the weights load on the workstation. Mark those checks blocked rather than replacing the model or fabricating output.
+
+## 9. Deferred intake-assistant phase
+
+Only after P05 passes should planning resume for:
+
+```text
+Whisper STT
+  -> deterministic consultation questionnaire
+  -> local Qwen extraction
+  -> cloned IndicF5 TTS
+  -> browser streaming and interruption handling
+```
+
+That later phase must preserve the original project boundaries: English/Hindi/Hinglish intake, 15 required questions, structured JSON plus readable summary, no diagnosis or prescribing, explicit confirmation of important values, and reviewed predefined safety questions. Passing this POC proves only voice-cloning feasibility; it does not prove latency, streaming behavior, medical safety, or full consultation readiness.
+
+## 10. Implementing-model instruction
+
+Read `AGENTS.md`, this plan, and any existing progress file. Execute the earliest unfinished `Pxx` task whose prerequisites are available. Keep the POC inside `voice-clone-poc/`; do not scaffold the deferred assistant. Never download unspecified models, add private assets, normalize the reference transcript, replace IndicF5 with a fake, or report unrun checks as passed. End each task with changed behavior, exact commands and observed results, blocked checks, and the next task ID.

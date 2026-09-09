@@ -1,0 +1,8 @@
+# Verified on Python 3.12.10, Windows x64, CPU-only Intel Iris Xe workstation.
+# The IndicF5 source commit is pinned; transitive dependencies are resolved by pip.
+f5_tts @ git+https://github.com/AI4Bharat/IndicF5.git@13f7c4d627cc10111aea8fe9c0039462cacacdc7
+torch==2.14.0
+torchaudio==2.11.0
+numpy==1.26.4
+soundfile==0.14.0
+transformers==4.49.0

@@ -1,0 +1,270 @@
+Build a local proof of concept for cloning my spouse’s voice using AI4Bharat IndicF5.
+
+Goal:
+I want to provide a short clean reference audio clip of my spouse and the exact transcript of that clip, then generate new Hindi or Hinglish speech that sounds like her. This is for personal use and she has consented to using her voice.
+
+Implement this step by step.
+
+Step 1 — Project setup
+
+Create a new Python project with a simple structure:
+
+voice-clone-poc/
+app.py
+requirements.txt
+samples/
+outputs/
+README.md
+
+Use Python 3.10.
+
+Create a virtual environment and document the setup commands.
+
+Install:
+
+* PyTorch
+* soundfile
+* numpy
+* AI4Bharat IndicF5
+* any dependencies required by IndicF5
+
+Prefer the official IndicF5 installation method.
+
+Step 2 — Reference audio
+
+Expect a reference file at:
+
+samples/spouse_hinglish.wav
+
+The recording should:
+
+* contain only one speaker
+* have minimal background noise
+* be approximately 20–60 seconds
+* contain natural Hindi/Hinglish speech
+* have no music
+* have no echo if possible
+
+Also store the exact transcript spoken in that audio.
+
+For now put the transcript in app.py as:
+
+REFERENCE_TEXT = """ <replace this with the exact words spoken in spouse_hinglish.wav>
+"""
+
+Do not alter or normalize the reference text automatically.
+
+Step 3 — Load IndicF5
+
+Load:
+
+ai4bharat/IndicF5
+
+using the officially recommended API.
+
+Use the GPU automatically when CUDA is available.
+
+Print:
+
+* whether CUDA is available
+* GPU name
+* model loaded successfully
+
+Keep the model loaded once instead of reloading for every generation.
+
+Step 4 — Generate cloned speech
+
+Create a function:
+
+generate_voice(
+text: str,
+output_path: str
+) -> None
+
+The function should use:
+
+* target text
+* samples/spouse_hinglish.wav
+* REFERENCE_TEXT
+
+to generate speech in my spouse’s voice.
+
+Save output as WAV at 24 kHz unless the model requires another sampling rate.
+
+Example target:
+
+"Okay ma'am, aap mujhe batayiye ki aapko ye problem kitne time se ho rahi hai."
+
+Save this as:
+
+outputs/test_01.wav
+
+Step 5 — Test multiple phrases
+
+Generate at least these test sentences:
+
+1.
+
+"Namaste, aapko kya problem ho rahi hai?"
+
+2.
+
+"Okay ma'am, aap mujhe batayiye ki aapko ye problem kitne time se ho rahi hai."
+
+3.
+
+"Aap currently koi medicines le rahe hain?"
+
+4.
+
+"Aap Kapiva ka product kitne time se use kar rahe hain?"
+
+5.
+
+"Okay, aur aapko diabetes, blood pressure ya thyroid ki koi problem hai?"
+
+Store them as:
+
+outputs/test_01.wav
+outputs/test_02.wav
+outputs/test_03.wav
+outputs/test_04.wav
+outputs/test_05.wav
+
+Step 6 — Compare reference strategies
+
+Support three optional reference files:
+
+samples/spouse_hindi.wav
+samples/spouse_english.wav
+samples/spouse_hinglish.wav
+
+Create a configuration variable:
+
+REFERENCE_MODE = "hinglish"
+
+Allow:
+
+"hindi"
+"english"
+"hinglish"
+
+Each mode should have:
+
+* its own audio reference
+* its own exact transcript
+
+For Hinglish target text, default to the Hinglish reference.
+
+Step 7 — Simple CLI
+
+Make app.py usable like:
+
+python app.py --text "Aap currently koi medicines le rahe hain?"
+
+Optional:
+
+python app.py 
+--text "Aap currently koi medicines le rahe hain?" 
+--reference hinglish 
+--output outputs/custom.wav
+
+If output is not specified, automatically generate a unique filename.
+
+Step 8 — Validation
+
+Before generating, validate:
+
+* reference audio exists
+* reference transcript is not empty
+* target text is not empty
+* output directory exists or create it
+* model loaded correctly
+
+Return useful error messages.
+
+Step 9 — Logging
+
+Log:
+
+* selected reference mode
+* target text
+* generation start
+* generation complete
+* output path
+* approximate generation time
+
+Do not log unnecessary private audio content.
+
+Step 10 — README
+
+Create a README containing:
+
+* prerequisites
+* Python version
+* environment setup
+* CUDA/GPU setup notes
+* where to place reference audio
+* how to provide the exact reference transcript
+* how to run generation
+* example commands
+* known limitations
+
+Mention clearly that voice cloning should only be used with the speaker’s consent.
+
+Step 11 — Evaluation
+
+Create:
+
+evaluation.md
+
+with a table:
+
+| Test | Voice similarity | Hindi pronunciation | English pronunciation | Hinglish naturalness | Notes |
+| ---- | ---------------- | ------------------- | --------------------- | -------------------- | ----- |
+
+Use a 1–5 manual rating.
+
+We will evaluate:
+
+* whether the voice actually resembles my spouse
+* Hindi pronunciation
+* English words inside Hindi sentences
+* Kapiva pronunciation
+* medicine names
+* numbers and dosage
+* natural pauses
+* speaking speed
+
+Step 12 — Do not build the full consultation agent yet
+
+For this phase, focus only on:
+
+reference audio
+→ IndicF5
+→ cloned speech WAV
+
+Do NOT yet add:
+
+* Whisper
+* Qwen
+* LiveKit
+* SIP calling
+* consultation workflow
+* database
+* RAG
+
+First confirm that voice cloning quality is acceptable.
+
+Success criteria:
+
+Given a 20–60 second clean reference sample from my spouse, the system should generate 5 unseen Hindi/Hinglish sentences that:
+
+* sound reasonably similar to her
+* remain understandable
+* pronounce English words inside Hinglish acceptably
+* can be generated locally
+* produce stable WAV output
+
+Once this succeeds, the next phase will integrate:
+Whisper STT → consultation workflow → Qwen → cloned TTS.
